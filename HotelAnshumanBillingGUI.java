@@ -40,7 +40,7 @@ import javax.swing.table.JTableHeader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
-import org.apache.pdfbox.pdmodel.font.PDType1Font;
+import org.apache.pdfbox.pdmodel.font.PDType0Font;
 
 import com.formdev.flatlaf.FlatLightLaf;
 
@@ -279,6 +279,14 @@ public class HotelAnshumanBillingGUI extends JFrame {
 
     private void showWarning(String title, String message) {
         JOptionPane.showMessageDialog(this, message, title, JOptionPane.WARNING_MESSAGE);
+    }
+
+    // Helper to make text safe for PDF when no Unicode font is embedded.
+    // If unicodeAvailable is false, replace the rupee symbol with "Rs." to avoid PDFBox encoding errors.
+    private static String pdfSafe(String text, boolean unicodeAvailable) {
+        if (text == null) return "";
+        if (unicodeAvailable) return text;
+        return text.replace("₹", "Rs.");
     }
 
     private void loadMenuData() {
@@ -794,153 +802,246 @@ public class HotelAnshumanBillingGUI extends JFrame {
         itemsDialog.setVisible(true);
     }
     
-    // --- PDFBox Generation Method ---
-    private void generatePdfBill(int orderId) {
-        Map<String, Object> orderData = getOrderDetails(orderId);
-        if (orderData.isEmpty()) {
-            showError("PDF Error", "Could not retrieve data for Order ID: " + orderId);
-            return;
-        }
+// --- PDFBox Generation Method ---
+private void generatePdfBill(int orderId) {
+    Map<String, Object> orderData = getOrderDetails(orderId);
+    if (orderData.isEmpty()) {
+        showError("PDF Error", "Could not retrieve data for Order ID: " + orderId);
+        return;
+    }
 
-        // Use JFileChooser to let the user select the save location
-        JFileChooser fileChooser = new JFileChooser();
-        fileChooser.setDialogTitle("Save Invoice PDF");
-        fileChooser.setSelectedFile(new File("Invoice_#" + orderId + ".pdf"));
+    JFileChooser fileChooser = new JFileChooser();
+    fileChooser.setDialogTitle("Save Invoice PDF");
+    fileChooser.setSelectedFile(new File("Invoice_#" + orderId + ".pdf"));
 
-        int userSelection = fileChooser.showSaveDialog(this);
+    int userSelection = fileChooser.showSaveDialog(this);
 
-        if (userSelection == JFileChooser.APPROVE_OPTION) {
-            File fileToSave = fileChooser.getSelectedFile();
-            
-            try (PDDocument document = new PDDocument()) {
-                PDPage page = new PDPage();
-                document.addPage(page);
-                
-                PDPageContentStream contentStream = new PDPageContentStream(document, page);
-                int y = 750; // Starting Y coordinate
-                final int margin = 50;
-                final int tableX = margin;
-                
+    if (userSelection == JFileChooser.APPROVE_OPTION) {
+        File fileToSave = fileChooser.getSelectedFile();
+
+        try (PDDocument document = new PDDocument()) {
+            // Try to load a Unicode TrueType font from common Windows font paths
+            PDType0Font embeddedFont = null;
+            String[] classpathFonts = new String[] {"/fonts/segoeui.ttf", "/fonts/DejaVuSans.ttf", "/fonts/arialuni.ttf"};
+            for (String resourcePath : classpathFonts) {
+                try (java.io.InputStream is = HotelAnshumanBillingGUI.class.getResourceAsStream(resourcePath)) {
+                    if (is != null) {
+                        embeddedFont = PDType0Font.load(document, is);
+                        break;
+                    }
+                } catch (IOException ex) {
+                    // try next
+                }
+            }
+
+            if (embeddedFont == null) {
+                String[] possibleFontPaths = new String[] {
+                    "C:\\Windows\\Fonts\\segoeui.ttf",
+                    "C:\\Windows\\Fonts\\arial.ttf",
+                    "C:\\Windows\\Fonts\\ARIALUNI.TTF",
+                    "C:\\Windows\\Fonts\\DejaVuSans.ttf"
+                };
+                for (String fp : possibleFontPaths) {
+                    try {
+                        java.io.File f = new java.io.File(fp);
+                        if (f.exists()) {
+                            embeddedFont = PDType0Font.load(document, f);
+                            break;
+                        }
+                    } catch (IOException ex) {
+                        // try next font
+                    }
+                }
+            }
+
+            if (embeddedFont == null) {
+                try {
+                    java.io.File winFonts = new java.io.File("C:\\Windows\\Fonts");
+                    if (winFonts.exists() && winFonts.isDirectory()) {
+                        java.io.File[] candidates = winFonts.listFiles((d, name) -> {
+                            String ln = name.toLowerCase();
+                            return ln.endsWith(".ttf") || ln.endsWith(".otf");
+                        });
+                        if (candidates != null) {
+                            for (java.io.File cf : candidates) {
+                                try {
+                                    PDType0Font testFont = PDType0Font.load(document, cf);
+                                    try {
+                                        testFont.encode("\u20B9");
+                                        embeddedFont = testFont;
+                                        break;
+                                    } catch (IllegalArgumentException ia) {
+                                        // font does not support glyph; continue
+                                    }
+                                } catch (IOException ioe) {
+                                    // ignore and continue
+                                }
+                            }
+                        }
+                    }
+                } catch (SecurityException se) {
+                    // cannot access Windows fonts folder — ignore
+                }
+            }
+
+            PDPage page = new PDPage();
+            document.addPage(page);
+
+            int y = 750; // Starting Y coordinate
+            final int margin = 50;
+            final int tableX = margin;
+
+            // --- Title and Header Text ---
+            try (PDPageContentStream contentStream = new PDPageContentStream(document, page)) {
                 contentStream.beginText();
-                
-                // --- Title ---
-                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 22);
+                org.apache.pdfbox.pdmodel.font.PDFont pdfFontToUse = embeddedFont;
+                if (pdfFontToUse == null) {
+                    String[] tryFonts = new String[] {"C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf", "C:\\Windows\\Fonts\\DejaVuSans.ttf"};
+                    for (String fp : tryFonts) {
+                        try {
+                            java.io.File f = new java.io.File(fp);
+                            if (f.exists()) {
+                                pdfFontToUse = PDType0Font.load(document, f);
+                                break;
+                            }
+                        } catch (IOException ex) {
+                            // ignore
+                        }
+                    }
+                }
+                float titleFontSize = 22;
+                if (pdfFontToUse != null) contentStream.setFont(pdfFontToUse, titleFontSize);
                 contentStream.newLineAtOffset(margin, y);
-                contentStream.showText("HOTEL ANSHUMAN - INVOICE");
-                
-                // --- Header Info ---
+                String titleText = "HOTEL ANSHUMAN - INVOICE";
+                if (embeddedFont == null) titleText = titleText.replace('₹', ' ');
+                contentStream.showText(pdfSafe(titleText, embeddedFont != null));
+
                 y -= 40;
-                contentStream.setFont(PDType1Font.HELVETICA, 12);
+                org.apache.pdfbox.pdmodel.font.PDFont bodyFont = pdfFontToUse;
+                if (bodyFont != null) contentStream.setFont(bodyFont, 12);
                 contentStream.newLineAtOffset(0, -40);
-                contentStream.showText("Invoice ID: #" + orderId);
-                
-                y -= 15;
-                contentStream.newLineAtOffset(0, -15);
-                contentStream.showText("Date: " + orderData.get("order_date"));
+                String invoiceIdText = "Invoice ID: #" + orderId;
+                if (embeddedFont == null) invoiceIdText = invoiceIdText.replace('₹', ' ');
+                contentStream.showText(pdfSafe(invoiceIdText, embeddedFont != null));
 
                 y -= 15;
                 contentStream.newLineAtOffset(0, -15);
-                contentStream.showText("Customer: " + orderData.get("customer_name"));
+                String dateText = "Date: " + orderData.get("order_date");
+                if (embeddedFont == null) dateText = dateText.replace('₹', ' ');
+                contentStream.showText(pdfSafe(dateText, embeddedFont != null));
 
                 y -= 15;
                 contentStream.newLineAtOffset(0, -15);
-                contentStream.showText("Address: " + orderData.get("address"));
-                
-                y -= 40;
-                contentStream.newLineAtOffset(0, -40);
+                String custText = "Customer: " + orderData.get("customer_name");
+                if (embeddedFont == null) custText = custText.replace('₹', ' ');
+                contentStream.showText(pdfSafe(custText, embeddedFont != null));
 
-                // --- Table Header (Manual drawing for simplicity) ---
+                y -= 15;
+                contentStream.newLineAtOffset(0, -15);
+                String addrText = "Address: " + orderData.get("address");
+                if (embeddedFont == null) addrText = addrText.replace('₹', ' ');
+                contentStream.showText(pdfSafe(addrText, embeddedFont != null));
+                contentStream.endText();
+
+                // --- Table Header ---
                 float[] colWidths = {250, 60, 80, 80};
                 float tableWidth = colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3];
-                int tableY = y;
-                
-                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 10);
-                contentStream.setLeading(15);
-                
-                // Draw Header Background
-                contentStream.setNonStrokingColor(UITheme.PRIMARY_COLOR.getRed(), UITheme.PRIMARY_COLOR.getGreen(), UITheme.PRIMARY_COLOR.getBlue());
-                contentStream.fillRect(tableX, tableY - 15, tableWidth, 15);
-                
-                // Write Header Text
-                contentStream.setNonStrokingColor(Color.WHITE.getRed(), Color.WHITE.getGreen(), Color.WHITE.getBlue());
-                contentStream.newLineAtOffset(0, 0); // Resetting Y position
-                contentStream.newLineAtOffset(tableX + 5, tableY - 12); // Item Name
-                contentStream.showText("ITEM");
-                contentStream.newLineAtOffset(colWidths[0], 0); // Qty
-                contentStream.showText("QTY");
-                contentStream.newLineAtOffset(colWidths[1], 0); // Unit Price
-                contentStream.showText("PRICE");
-                contentStream.newLineAtOffset(colWidths[2], 0); // Total
-                contentStream.showText("TOTAL");
-                
-                tableY -= 15;
-                
+                int tableY = y - 40;
+
+                // Draw header background
+                System.out.println("Setting header background color: R=" + (70/255f) + ", G=" + (130/255f) + ", B=" + (180/255f));
+                contentStream.setNonStrokingColor(70/255f, 130/255f, 180/255f);
+                contentStream.addRect(tableX, tableY - 15, tableWidth, 15);
+                contentStream.fill();
+
+                // --- Header Text ---
+                contentStream.beginText();
+                System.out.println("Setting header text color: WHITE");
+                contentStream.setNonStrokingColor(Color.WHITE);
+                contentStream.setFont(bodyFont, 10);
+                contentStream.newLineAtOffset(tableX + 5, tableY - 12);
+                contentStream.showText(pdfSafe("ITEM", embeddedFont != null));
+                contentStream.newLineAtOffset(colWidths[0], 0);
+                contentStream.showText(pdfSafe("QTY", embeddedFont != null));
+                contentStream.newLineAtOffset(colWidths[1], 0);
+                contentStream.showText(pdfSafe("PRICE", embeddedFont != null));
+                contentStream.newLineAtOffset(colWidths[2], 0);
+                contentStream.showText(pdfSafe("TOTAL", embeddedFont != null));
+                contentStream.endText();
+
                 // --- Table Rows ---
-                contentStream.setFont(PDType1Font.HELVETICA, 10);
-                contentStream.setNonStrokingColor(Color.BLACK.getRed(), Color.BLACK.getGreen(), Color.BLACK.getBlue());
                 DefaultTableModel itemsModel = (DefaultTableModel) orderData.get("items");
-                
+                tableY -= 15;
+                contentStream.beginText();
+                contentStream.setFont(bodyFont, 10);
+                System.out.println("Setting table row text color: BLACK");
+                contentStream.setNonStrokingColor(Color.BLACK);
+
                 for (int i = 0; i < itemsModel.getRowCount(); i++) {
                     String itemName = itemsModel.getValueAt(i, 1).toString();
                     String qty = itemsModel.getValueAt(i, 2).toString();
                     String price = itemsModel.getValueAt(i, 3).toString();
                     String totalItem = itemsModel.getValueAt(i, 4).toString();
-                    
+
                     tableY -= 15;
                     contentStream.newLineAtOffset(tableX + 5, tableY);
-                    contentStream.showText(itemName);
-                    
-                    contentStream.newLineAtOffset(colWidths[0] - 5, 0); 
-                    contentStream.showText(qty);
-                    
+                    String displayItem = itemName;
+                    String displayQty = qty;
+                    String displayPrice = ((embeddedFont != null) ? "₹" : "Rs.") + price;
+                    String displayTotal = ((embeddedFont != null) ? "₹" : "Rs.") + totalItem;
+
+                    contentStream.showText(pdfSafe(displayItem, embeddedFont != null));
+                    contentStream.newLineAtOffset(colWidths[0] - 5, 0);
+                    contentStream.showText(pdfSafe(displayQty, embeddedFont != null));
                     contentStream.newLineAtOffset(colWidths[1], 0);
-                    contentStream.showText("₹" + price);
-                    
+                    contentStream.showText(pdfSafe(displayPrice, embeddedFont != null));
                     contentStream.newLineAtOffset(colWidths[2], 0);
-                    contentStream.showText("₹" + totalItem);
+                    contentStream.showText(pdfSafe(displayTotal, embeddedFont != null));
                 }
-                
-                y = tableY - 40;
-                
+                contentStream.endText();
+
                 // --- Summary Totals ---
-                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 12);
+                y = tableY - 40;
+                contentStream.beginText();
+                if (bodyFont != null) contentStream.setFont(bodyFont, 12);
                 contentStream.newLineAtOffset(tableWidth - 100, y);
-                contentStream.showText("Subtotal: ₹" + df.format(orderData.get("total_amount")));
+                String subtotalStr = ((embeddedFont != null) ? "₹" : "Rs.") + df.format(orderData.get("total_amount"));
+                contentStream.showText(pdfSafe("Subtotal: " + subtotalStr, embeddedFont != null));
 
                 y -= 15;
-                contentStream.setFont(PDType1Font.HELVETICA, 12);
+                contentStream.setFont(bodyFont, 12);
                 contentStream.newLineAtOffset(0, -15);
-                contentStream.showText("GST (5%): ₹" + df.format(orderData.get("gst")));
+                String gstStr = ((embeddedFont != null) ? "₹" : "Rs.") + df.format(orderData.get("gst"));
+                contentStream.showText(pdfSafe("GST (5%): " + gstStr, embeddedFont != null));
 
                 y -= 25;
-                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 14);
+                if (bodyFont != null) contentStream.setFont(bodyFont, 14);
                 contentStream.newLineAtOffset(0, -25);
-                contentStream.showText("GRAND TOTAL: ₹" + df.format(orderData.get("grand_total")));
+                String grandStr = ((embeddedFont != null) ? "₹" : "Rs.") + df.format(orderData.get("grand_total"));
+                contentStream.showText(pdfSafe("GRAND TOTAL: " + grandStr, embeddedFont != null));
 
                 y -= 20;
-                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.setFont(bodyFont, 10);
                 contentStream.newLineAtOffset(0, -20);
-                contentStream.showText("Payment Method: " + orderData.get("payment_method"));
-                
+                contentStream.showText(pdfSafe("Payment Method: " + orderData.get("payment_method"), embeddedFont != null));
+
                 y -= 40;
-                contentStream.setFont(PDType1Font.HELVETICA_OBLIQUE, 10);
+                contentStream.setFont(bodyFont, 10);
                 contentStream.newLineAtOffset(0, -40);
-                contentStream.showText("Thank you for choosing Hotel Anshuman!");
-                
+                contentStream.showText(pdfSafe("Thank you for choosing Hotel Anshuman!", embeddedFont != null));
                 contentStream.endText();
-                contentStream.close();
-                document.save(fileToSave);
-
-                JOptionPane.showMessageDialog(this, 
-                    "PDF Invoice for Order #" + orderId + " saved to:\n" + fileToSave.getAbsolutePath(), 
-                    "PDF Generated", JOptionPane.INFORMATION_MESSAGE);
-
-            } catch (IOException e) {
-                showError("PDF Error", "Failed to generate PDF: " + e.getMessage());
             }
+            document.save(fileToSave);
+
+            JOptionPane.showMessageDialog(this,
+                "PDF Invoice for Order #" + orderId + " saved to:\n" + fileToSave.getAbsolutePath(),
+                "PDF Generated", JOptionPane.INFORMATION_MESSAGE);
+
+        } catch (IOException e) {
+            showError("PDF Error", "Failed to generate PDF: " + e.getMessage());
         }
     }
-    
+}   
     // --- Past Order Item Editing Logic ---
     
     private void updatePastOrderItemQuantity(JTable itemsTable, JLabel subtotalLabel, JLabel gstLabel, JLabel totalLabel) {
